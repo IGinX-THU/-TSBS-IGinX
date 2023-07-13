@@ -89,7 +89,6 @@ func (p *processor) Init(_ int) {
 
 	settings, err := client_v2.NewSessionSettings(connectionStrings)
 	if err != nil {
-		fmt.Println(err)
 		log.Fatal(err)
 	}
 
@@ -118,30 +117,25 @@ func Do(q *query.Iginx, session *client_v2.Session) (lag float64, err error) {
 	// execute sql
 	cursor, err := session.ExecuteQuery(sql, 100)
 	if err != nil {
-		fmt.Println(err)
 		return 0, err
 	}
 
 	if _, err := cursor.GetFields(); err != nil {
-		fmt.Println(err)
 		return 0, err
 	}
 	for {
 		hasMore, err := cursor.HasMore()
 		if err != nil {
-			fmt.Println(err)
 			log.Fatal(err)
 		}
 		if !hasMore {
 			break
 		}
 		if _, err := cursor.NextRow(); err != nil {
-			fmt.Println(err)
 			return 0, err
 		}
 	}
 	if err := cursor.Close(); err != nil {
-		fmt.Println(err)
 		return 0, err
 	}
 

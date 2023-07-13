@@ -49,7 +49,6 @@ func (p *processor) Init(_ int, _, _ bool) {
 
 	settings, err := client_v2.NewSessionSettings(connectionStrings)
 	if err != nil {
-		fmt.Println(err)
 		log.Fatal(err)
 	}
 
