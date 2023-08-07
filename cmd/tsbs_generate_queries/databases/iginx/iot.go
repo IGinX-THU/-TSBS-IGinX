@@ -9,10 +9,6 @@ import (
 	"github.com/timescale/tsbs/pkg/query"
 )
 
-const (
-	iotReadingsTable = "readings"
-)
-
 // IoT produces TimescaleDB-specific queries for all the iot query types.
 type IoT struct {
 	*iot.Core
@@ -49,7 +45,8 @@ func (i *IoT) getTruckWhereString(nTrucks int) string {
 
 // LastLocByTruck finds the truck location for nTrucks.
 func (i *IoT) LastLocByTruck(qi query.Query, nTrucks int) {
-	iginxql := fmt.Sprintf("SELECT last(longitude), last(latitude) FROM readings.%s.*.*.*.*",
+	iginxql := fmt.Sprintf(`SELECT last(longitude), last(latitude)
+		FROM readings.%s.*.*.*.*`,
 		i.getTruckWhereString(nTrucks))
 
 	humanLabel := "Iginx last location by specific truck"
@@ -61,8 +58,8 @@ func (i *IoT) LastLocByTruck(qi query.Query, nTrucks int) {
 
 // LastLocPerTruck finds all the truck locations along with truck and driver names.
 func (i *IoT) LastLocPerTruck(qi query.Query) {
-	//iginxql := "SELECT last(longitude), last(latitude) FROM readings.*.*.*.*.*"
-	iginxql := "select a.longitude as longitude, b.latitude as latitude, a.truck as truck from (select truck, last_value(value) as longitude from (select transposition(*) from (select latitude, longitude from readings.*.*.*.*.*)) group by truck, name having name = 'longitude') as a, (select truck, last_value(value) as latitude from (select transposition(*) from (select latitude, longitude from readings.*.*.*.*.*)) group by truck, name having name = 'latitude') as b where a.truck = b.truck"
+	iginxql := `SELECT last(longitude), last(latitude)
+		FROM readings.*.*.*.*.*`
 	humanLabel := "Iginx last location per truck"
 	humanDesc := humanLabel
 
@@ -71,7 +68,13 @@ func (i *IoT) LastLocPerTruck(qi query.Query) {
 
 // TrucksWithLowFuel finds all trucks with low fuel (less than 10%).
 func (i *IoT) TrucksWithLowFuel(qi query.Query) {
-	iginxql := fmt.Sprintf("select truck, last_value(value) as fuel from (select transposition(fuel_state) from diagnostics.*.%s.*.*.*) group by truck having last_value(value) < 0.1;",
+	iginxql := fmt.Sprintf(`SELECT truck, last_value(value) AS fuel 
+		FROM (
+			SELECT transposition(fuel_state)
+			FROM diagnostics.*.%s.*.*.*
+		)
+		GROUP BY truck 
+		HAVING last_value(value) < 0.1;`,
 		i.GetRandomFleet())
 
 	humanLabel := "Iginx trucks with low fuel"
@@ -82,9 +85,29 @@ func (i *IoT) TrucksWithLowFuel(qi query.Query) {
 
 // TrucksWithHighLoad finds all trucks that have load over 90%.
 func (i *IoT) TrucksWithHighLoad(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
 	fleet := i.GetRandomFleet()
-	iginxql := fmt.Sprintf("select a.curr_load as load, a.truck as truck, b.capacity as capacity from (select truck, last_value(value) as curr_load from (select transposition(*) from diagnostics.*.%s.*.*.*) group by name, truck having name = 'current_load') as a, (select truck, last_value(value) as capacity from (select transposition(*) from diagnostics.*.%s.*.*.*) group by name, truck having name = 'load_capacity') as b where a.truck = b.truck",
+	iginxql := fmt.Sprintf(`SELECT truck
+		FROM (
+			SELECT a.truck AS truck, a.curr_load / b.capacity AS rate
+			FROM (
+				SELECT truck, last_value(value) AS curr_load
+				FROM (
+					SELECT transposition(current_load)
+					FROM diagnostics.*.%s.*.*.*
+				)
+				GROUP BY truck
+			) AS a
+			INNER JOIN (
+				SELECT truck, last_value(value) AS capacity
+				FROM (
+					SELECT transposition(load_capacity)
+					FROM diagnostics.*.%s.*.*.*
+				) 
+				GROUP BY truck
+			) AS b
+			ON a.truck = b.truck
+		)
+		WHERE rate > 0.9`,
 		fleet, fleet)
 
 	humanLabel := "Iginx trucks with high load"
@@ -95,11 +118,27 @@ func (i *IoT) TrucksWithHighLoad(qi query.Query) {
 
 // StationaryTrucks finds all trucks that have low average velocity in a time window.
 func (i *IoT) StationaryTrucks(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
 	interval := i.Interval.MustRandWindow(iot.StationaryDuration)
+	start := interval.Start().Unix() * 1000 * 1000 * 1000
+	end := interval.End().Unix() * 1000 * 1000 * 1000
 
-	iginxql := fmt.Sprintf("SELECT AVG(velocity) FROM readings.*.%s where time >=%d and time <= %d",
-		i.GetRandomFleet(), interval.Start().Unix()*1000, interval.End().Unix()*1000)
+	iginxql := fmt.Sprintf(`SELECT truck
+		FROM (
+			SELECT transposition(*)
+			FROM (
+				SELECT avg(velocity)
+				FROM readings.*.%s.*.*.*
+				WHERE key >= %d AND key <= %d
+				OVER (RANGE 10m IN [%d,%d])
+			)
+		)
+		GROUP BY truck
+		HAVING avg(value) < 1`,
+		i.GetRandomFleet(),
+		start,
+		end,
+		start,
+		end)
 
 	humanLabel := "Iginx stationary trucks"
 	humanDesc := fmt.Sprintf("%s: with low avg velocity in last 10 minutes", humanLabel)
@@ -109,10 +148,26 @@ func (i *IoT) StationaryTrucks(qi query.Query) {
 
 // TrucksWithLongDrivingSessions finds all trucks that have not stopped at least 20 mins in the last 4 hours.
 func (i *IoT) TrucksWithLongDrivingSessions(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
-	interval := i.Interval.MustRandWindow(iot.StationaryDuration)
-	iginxql := fmt.Sprintf("SELECT AVG(velocity) FROM readings.*.%s.* GROUP [%d, %d] BY 10ms",
-		i.GetRandomFleet(), interval.Start().Unix(), interval.End().Unix())
+	interval := i.Interval.MustRandWindow(iot.LongDrivingSessionDuration)
+	start := interval.Start().Unix() * 1000 * 1000 * 1000
+	end := interval.End().Unix() * 1000 * 1000 * 1000
+
+	iginxql := fmt.Sprintf(`SELECT truck
+		FROM (
+			SELECT transposition(*)
+			FROM (
+				SELECT avg(velocity)
+				FROM readings.*.%s.*.*.*
+				OVER (RANGE 10m IN [%d,%d])
+			)
+		)
+		WHERE value > 1
+		GROUP BY truck
+		HAVING count(value) > %d`,
+		i.GetRandomFleet(),
+		start,
+		end,
+		tenMinutePeriods(5, iot.LongDrivingSessionDuration))
 
 	humanLabel := "Iginx trucks with longer driving sessions"
 	humanDesc := fmt.Sprintf("%s: stopped less than 20 mins in 4 hour period", humanLabel)
@@ -122,20 +177,37 @@ func (i *IoT) TrucksWithLongDrivingSessions(qi query.Query) {
 
 // TrucksWithLongDailySessions finds all trucks that have driven more than 10 hours in the last 24 hours.
 func (i *IoT) TrucksWithLongDailySessions(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
-	interval := i.Interval.MustRandWindow(iot.StationaryDuration)
-	iginxql := fmt.Sprintf("SELECT AVG(velocity) FROM readings.*.%s.* GROUP [%d, %d] BY 10ms",
-		i.GetRandomFleet(), interval.Start().Unix(), interval.End().Unix())
+	interval := i.Interval.MustRandWindow(iot.DailyDrivingDuration)
+	start := interval.Start().Unix() * 1000 * 1000 * 1000
+	end := interval.End().Unix() * 1000 * 1000 * 1000
 
-	humanLabel := "Iginx trucks with longer driving sessions"
-	humanDesc := fmt.Sprintf("%s: stopped less than 20 mins in 4 hour period", humanLabel)
+	iginxql := fmt.Sprintf(`SELECT truck
+		FROM (
+			SELECT transposition(*)
+			FROM (
+				SELECT avg(velocity)
+				FROM readings.*.%s.*.*.*
+				OVER (RANGE 10m IN [%d,%d])
+			)
+		)
+		WHERE value > 1
+		GROUP BY truck
+		HAVING count(value) > %d`,
+		i.GetRandomFleet(),
+		start,
+		end,
+		tenMinutePeriods(35, iot.DailyDrivingDuration))
+
+	humanLabel := "Iginx trucks with longer daily sessions"
+	humanDesc := fmt.Sprintf("%s: drove more than 10 hours in the last 24 hours", humanLabel)
 
 	i.fillInQuery(qi, humanLabel, humanDesc, iginxql)
 }
 
 // AvgVsProjectedFuelConsumption calculates average and projected fuel consumption per fleet.
 func (i *IoT) AvgVsProjectedFuelConsumption(qi query.Query) {
-	iginxql := fmt.Sprintf("select sum(fuel_consumption) from readings.*.*.*.*.* agg level = 2")
+	iginxql := `SELECT sum(fuel_consumption)
+		FROM readings.*.*.*.*.* agg level = 2`
 
 	humanLabel := "Iginx average vs projected fuel consumption per fleet"
 	humanDesc := humanLabel
@@ -145,8 +217,45 @@ func (i *IoT) AvgVsProjectedFuelConsumption(qi query.Query) {
 
 // AvgDailyDrivingDuration finds the average driving duration per driver.
 func (i *IoT) AvgDailyDrivingDuration(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
-	iginxql := fmt.Sprintf("SELECT AVG(velocity) FROM readings.*.%s.*", i.GetRandomFleet())
+	start := i.Interval.Start().Unix() * 1000 * 1000 * 1000
+	end := i.Interval.End().Unix() * 1000 * 1000 * 1000
+	fleet := i.GetRandomFleet()
+
+	iginxql := fmt.Sprintf(`SELECT a.truck as truck, 24 * a.driving_ten_mins / b.ten_mins as hours_daily
+		FROM (
+			SELECT truck, count(value) AS driving_ten_mins
+			FROM(
+				SELECT transposition(*)
+				FROM (
+					SELECT avg(velocity)
+					FROM readings.*.%s.*.*.*
+					OVER (RANGE 10m IN [%d,%d])
+				)
+			)
+			WHERE value > 1
+			GROUP BY truck
+		) AS a JOIN (
+			SELECT truck, last_value(value) AS ten_mins
+			FROM(
+				SELECT transposition(*)
+				FROM (
+					SELECT count(*)
+					FROM (
+						SELECT avg(velocity)
+						FROM readings.*.%s.*.*.*
+						OVER (RANGE 10m IN [%d,%d])
+					)
+				)
+			)
+			GROUP BY truck
+		) AS b
+		ON a.truck = b.truck`,
+		fleet,
+		start,
+		end,
+		fleet,
+		start,
+		end)
 
 	humanLabel := "Iginx average driver driving duration per day"
 	humanDesc := humanLabel
@@ -156,8 +265,25 @@ func (i *IoT) AvgDailyDrivingDuration(qi query.Query) {
 
 // AvgDailyDrivingSession finds the average driving session without stopping per driver per day.
 func (i *IoT) AvgDailyDrivingSession(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
-	iginxql := fmt.Sprintf("SELECT AVG(velocity) FROM readings.*.%s.*", i.GetRandomFleet())
+	// TODO 需要udsf传入key
+	start := i.Interval.Start().Unix() * 1000 * 1000 * 1000
+	end := i.Interval.End().Unix() * 1000 * 1000 * 1000
+	fleet := i.GetRandomFleet()
+	iginxql := fmt.Sprintf(`SELECT *
+		FROM(
+			SELECT avg_driving_session_div_6(*)
+			FROM (
+				SELECT AVG(velocity)
+				FROM readings.*.%s.*.*.*
+				OVER(RANGE 10m IN [%d, %d])
+			)
+			OVER(RANGE 1d IN [%d, %d])
+		)`,
+		fleet,
+		start,
+		end,
+		start,
+		end)
 
 	humanLabel := "Iginx average driver driving session without stopping per day"
 	humanDesc := humanLabel
@@ -167,7 +293,19 @@ func (i *IoT) AvgDailyDrivingSession(qi query.Query) {
 
 // AvgLoad finds the average load per truck model per fleet.
 func (i *IoT) AvgLoad(qi query.Query) {
-	iginxql := fmt.Sprintf("select avg(current_load) from diagnostics.*.*.*.*.* agg level=1,2")
+	iginxql := `SELECT avg(*)
+		FROM(
+			SELECT div_load_cap(*)
+			FROM (
+				SELECT avg(current_load)
+				FROM diagnostics.*.*.*.*.*
+			), (
+				SELECT load_capacity
+				FROM diagnostics.*.*.*.*.*
+				LIMIT 1
+			)
+		)
+		AGG level=1,2`
 
 	humanLabel := "Iginx average load per truck model per fleet"
 	humanDesc := humanLabel
@@ -175,12 +313,28 @@ func (i *IoT) AvgLoad(qi query.Query) {
 	i.fillInQuery(qi, humanLabel, humanDesc, iginxql)
 }
 
-// DailyTruckActivity returns the number of hours trucks has been active (not out-of-commission) per day per fleet per model.
+// DailyTruckActivity returns the number of hours trucks hAS been active (not out-of-commission) per day per fleet per model.
 func (i *IoT) DailyTruckActivity(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
-	start := i.Interval.Start().Unix()
-	end := i.Interval.End().Unix()
-	iginxql := fmt.Sprintf(`SELECT AVG(status) FROM diagnostics.*.*.*.* GROUP [%d, %d] BY time(1d)`, start, end)
+	start := i.Interval.Start().Unix() * 1000 * 1000 * 1000
+	end := i.Interval.End().Unix() * 1000 * 1000 * 1000
+	iginxql := fmt.Sprintf(`SELECT div_144(*)
+		FROM(
+			SELECT sum(*)
+			FROM (
+				SELECT l_one(*)
+				FROM(
+					SELECT avg(status)
+					FROM diagnostics.*.*.*.*.*
+					OVER (RANGE 10m IN [%d, %d])
+				)
+			)
+			OVER (RANGE 1d IN [%d, %d])
+			AGG level=2,4
+		)`,
+		start,
+		end,
+		start,
+		end)
 
 	humanLabel := "Iginx daily truck activity per fleet per model"
 	humanDesc := humanLabel
@@ -190,13 +344,30 @@ func (i *IoT) DailyTruckActivity(qi query.Query) {
 
 // TruckBreakdownFrequency calculates the amount of times a truck model broke down in the last period.
 func (i *IoT) TruckBreakdownFrequency(qi query.Query) {
-	// not all implemented limited by iginx sql grammar
-	start := i.Interval.Start().Unix()
-	end := i.Interval.End().Unix()
-	iginxql := fmt.Sprintf(`SELECT AVG(status) FROM diagnostics.*.*.*.* GROUP [%d, %d] BY time(1d)`, start, end)
+	start := i.Interval.Start().Unix() * 1000 * 1000 * 1000
+	end := i.Interval.End().Unix() * 1000 * 1000 * 1000
 
-	humanLabel := "Iginx truck breakdown frequency per model"
-	humanDesc := humanLabel
+	iginxql := fmt.Sprintf(`SELECT count_up(*)
+		FROM(
+			SELECT ge_half(*)
+			FROM (
+				SELECT avg(*)
+				FROM(
+					SELECT nzero(status)
+					FROM diagnostics.*.*.*.*.*
+					WHERE key >= %d AND key <= %d
+				)
+				OVER(RANGE 10m IN [%d, %d])
+				AGG level=4
+			)
+		)`,
+		start,
+		end,
+		start,
+		end)
+
+	humanLabel := "Iginx stationary trucks"
+	humanDesc := fmt.Sprintf("%s: with low avg velocity in last 10 minutes", humanLabel)
 
 	i.fillInQuery(qi, humanLabel, humanDesc, iginxql)
 }

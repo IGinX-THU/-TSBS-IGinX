@@ -1,0 +1,10 @@
+UDAF,count_up,UDFCountUp,udf_count_up.py
+UDAF,avg_driving_session_div_6,UDFAvgDrivingSessionDiv6,udf_avg_driving_session_div_6.py
+
+UDTF,ge_half,UDFGeHalf,udtf_ge_half.py
+UDTF,nzero,UDFNZero,udtf_nzero.py
+UDTF,l_one,UDFLOne,udtf_l_one.py
+UDTF,div_144,UDFDiv144,udtf_div_144.py
+UDTF,div_load_cap,UDFDivLoadCap,udtf_div_load_cap.py
+
+UDSF,transposition,UDFTranspositionByTruck,udsf_transposition_by_truck.py
