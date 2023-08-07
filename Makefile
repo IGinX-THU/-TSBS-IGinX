@@ -29,7 +29,6 @@ coverage:
 tsbs_%: $(wildcard ./cmd/$@/*.go)
 	$(GOGET) ./cmd/$@
 	$(GOBUILD) -o bin/$@ ./cmd/$@
-	$(GOINSTALL) ./cmd/$@
 
 checkfmt:
 	@echo 'Checking gofmt';\
