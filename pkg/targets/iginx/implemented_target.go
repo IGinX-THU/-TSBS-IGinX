@@ -17,8 +17,7 @@ type influxTarget struct {
 }
 
 func (t *influxTarget) TargetSpecificFlags(flagPrefix string, flagSet *pflag.FlagSet) {
-	flagSet.String(flagPrefix+"url", "http://localhost:6666/", "Iginx REST end point")
-	flagSet.String(flagPrefix+"ilp-bind-to", "127.0.0.1:6666", "Iginx influx line protocol TCP ip:port")
+	flagSet.String(flagPrefix+"connStr", "127.0.0.1:6888", "Iginx addresses (ip:port,ip:port,...)")
 }
 
 func (t *influxTarget) TargetName() string {

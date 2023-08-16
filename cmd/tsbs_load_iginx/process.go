@@ -2,25 +2,19 @@ package main
 
 import (
 	"fmt"
-	"github.com/iznauy/IGinX-client-go/client_v2"
-	"github.com/iznauy/IGinX-client-go/rpc"
-	"github.com/timescale/tsbs/pkg/targets"
 	"log"
 	"math/rand"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/iznauy/IGinX-client-go/client_v2"
+	"github.com/iznauy/IGinX-client-go/rpc"
+	"github.com/timescale/tsbs/pkg/targets"
 )
 
 // allows for testing
-var (
-	printFn              = fmt.Printf
-	connectionStringList = strings.Split("172.40.0.52:6888,172.40.0.53:6888,172.40.0.54:6888,172.40.0.55:6888", ",") //connectionStringList = []string{"127.0.0.1:6888"}
-
-	defaultTruck = "unknown"
-	defaultTagK  = []string{"fleet", "driver", "model", "device_version"}
-	defaultTagV  = []string{"unknown", "unknown", "unknown", "unknown"}
-)
+var printFn = fmt.Printf
 
 type processor struct {
 	session *client_v2.Session
@@ -41,8 +35,8 @@ func shuffle(nums []int) []int {
 
 func (p *processor) Init(_ int, _, _ bool) {
 	connectionStrings := ""
-	numbers := make([]int, 0, len(connectionStringList))
-	for i := 0; i < len(connectionStringList); i++ {
+	numbers := make([]int, 0, len(connectionSocketList))
+	for i := 0; i < len(connectionSocketList); i++ {
 		numbers = append(numbers, i)
 	}
 	numbers = shuffle(numbers)
@@ -50,12 +44,11 @@ func (p *processor) Init(_ int, _, _ bool) {
 		if i > 0 {
 			connectionStrings += ","
 		}
-		connectionStrings += connectionStringList[numbers[i]]
+		connectionStrings += connectionSocketList[numbers[i]]
 	}
 
 	settings, err := client_v2.NewSessionSettings(connectionStrings)
 	if err != nil {
-		fmt.Println(err)
 		log.Fatal(err)
 	}
 

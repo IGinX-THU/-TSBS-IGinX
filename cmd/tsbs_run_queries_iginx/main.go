@@ -22,8 +22,7 @@ import (
 // Global vars:
 var (
 	runner               *query.BenchmarkRunner
-	connectionStringList = strings.Split("172.16.17.21:6777,172.16.17.22:6777,172.16.17.23:6777,172.16.17.24:6777", ",")
-	//connectionStringList = []string{"127.0.0.1:6888"}
+	connectionStringList []string
 )
 
 // Parse args:
@@ -32,6 +31,7 @@ func init() {
 
 	var config query.BenchmarkRunnerConfig
 	config.AddToFlagSet(pflag.CommandLine)
+	pflag.String("connStr", "127.0.0.1:6888", "Iginx addresses (ip:port,ip:port,...)")
 
 	pflag.Parse()
 
@@ -43,6 +43,12 @@ func init() {
 
 	if err := viper.Unmarshal(&config); err != nil {
 		panic(fmt.Errorf("unable to decode config: %s", err))
+	}
+
+	var connectionStrings = viper.GetString("connStr")
+	connectionStringList = strings.Split(connectionStrings, ",")
+	if len(connectionStringList) == 0 {
+		log.Fatal("missing 'connStr' flag")
 	}
 
 	runner = query.NewBenchmarkRunner(config)
@@ -83,7 +89,6 @@ func (p *processor) Init(_ int) {
 
 	settings, err := client_v2.NewSessionSettings(connectionStrings)
 	if err != nil {
-		fmt.Println(err)
 		log.Fatal(err)
 	}
 
@@ -112,30 +117,25 @@ func Do(q *query.Iginx, session *client_v2.Session) (lag float64, err error) {
 	// execute sql
 	cursor, err := session.ExecuteQuery(sql, 100)
 	if err != nil {
-		fmt.Println(err)
 		return 0, err
 	}
 
 	if _, err := cursor.GetFields(); err != nil {
-		fmt.Println(err)
 		return 0, err
 	}
 	for {
 		hasMore, err := cursor.HasMore()
 		if err != nil {
-			fmt.Println(err)
 			log.Fatal(err)
 		}
 		if !hasMore {
 			break
 		}
 		if _, err := cursor.NextRow(); err != nil {
-			fmt.Println(err)
 			return 0, err
 		}
 	}
 	if err := cursor.Close(); err != nil {
-		fmt.Println(err)
 		return 0, err
 	}
 
