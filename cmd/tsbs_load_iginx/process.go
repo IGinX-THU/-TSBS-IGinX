@@ -20,6 +20,13 @@ type processor struct {
 	session *client_v2.Session
 }
 
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func init() {
 	rand.Seed(time.Now().UTC().UnixNano())
 }
@@ -203,42 +210,284 @@ func (p *processor) ProcessBatch(b targets.Batch, doLoad bool) (uint64, uint64) 
 	var types []rpc.DataType
 	var pathIndices = make(map[string]int)
 
-	for _, line := range lines {
-		parts := strings.Split(line, " ")
-		subPaths, _ := parseMeasurementAndValues(parts[0], parts[1])
-		for _, subPath := range subPaths {
-			if _, ok := pathIndices[subPath]; ok {
-				continue
-			}
-			pathIndices[subPath] = len(paths)
-			paths = append(paths, subPath)
-			types = append(types, rpc.DataType_DOUBLE)
-		}
-		timestamp, _ := strconv.ParseInt(parts[2], 10, 64)
-		if _, ok := timestampIndices[timestamp]; !ok {
-			timestampIndices[timestamp] = len(timestamps)
-			timestamps = append(timestamps, timestamp)
-		}
-	}
+	parts := strings.Split(lines[0], " ")
+	fir := strings.Split(parts[0], ",")
+	colname := fir[0]
 
-	for range paths {
-		values = append(values, make([]interface{}, len(timestamps), len(timestamps)))
-	}
+	if colname != "cpu" {
+		pathIndices["tags.name"] = len(paths)
+		paths = append(paths, "tags.name")
+		types = append(types, rpc.DataType_BINARY)
 
-	for _, line := range lines {
-		secondIndex := 0
-		parts := strings.Split(line, " ")
-		timestamp, _ := strconv.ParseInt(parts[2], 10, 64)
-		for i := range timestamps {
-			if timestamps[i] == timestamp {
-				secondIndex = i
-				break
+		pathIndices["tags.fleet"] = len(paths)
+		paths = append(paths, "tags.fleet")
+		types = append(types, rpc.DataType_BINARY)
+
+		pathIndices["tags.driver"] = len(paths)
+		paths = append(paths, "tags.driver")
+		types = append(types, rpc.DataType_BINARY)
+
+		pathIndices["tags.model"] = len(paths)
+		paths = append(paths, "tags.model")
+		types = append(types, rpc.DataType_BINARY)
+
+		pathIndices["tags.device_version"] = len(paths)
+		paths = append(paths, "tags.device_version")
+		types = append(types, rpc.DataType_BINARY)
+
+		pathIndices["tags.fuel_capacity"] = len(paths)
+		paths = append(paths, "tags.fuel_capacity")
+		types = append(types, rpc.DataType_DOUBLE)
+
+		pathIndices["tags.load_capacity"] = len(paths)
+		paths = append(paths, "tags.load_capacity")
+		types = append(types, rpc.DataType_DOUBLE)
+
+		pathIndices["tags.nominal_fuel_consumption"] = len(paths)
+		paths = append(paths, "tags.nominal_fuel_consumption")
+		types = append(types, rpc.DataType_DOUBLE)
+
+		pathIndices["tags.tagid"] = len(paths)
+		paths = append(paths, "tags.tagid")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["readings.tagid"] = len(paths)
+		paths = append(paths, "readings.tagid")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["diagnostics.tagid"] = len(paths)
+		paths = append(paths, "diagnostics.tagid")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["readings.timestamp"] = len(paths)
+		paths = append(paths, "readings.timestamp")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["diagnostics.timestamp"] = len(paths)
+		paths = append(paths, "diagnostics.timestamp")
+		types = append(types, rpc.DataType_LONG)
+
+		tagMap := make(map[string]map[string]interface{})
+
+		var performance = []string{"fuel_capacity", "load_capacity", "nominal_fuel_consumption"}
+
+		for _, line := range lines {
+			parts := strings.Split(line, " ")
+			subPaths, subValues := parseMeasurementAndValues(parts[0], parts[1])
+
+			for i, subPath := range subPaths {
+				ifp := false
+				items := strings.Split(subPath, ".")
+				if _, ok := tagMap[items[1]]; ok {
+					for _, p := range performance {
+						if p == items[6] {
+							tagMap[items[1]][p] = subValues[i]
+							ifp = true
+							break
+						}
+					}
+				} else {
+					timestamp := int64(len(tagMap))
+					tagMap[items[1]] = make(map[string]interface{})
+					tagMap[items[1]]["tagid"] = timestamp
+
+					timestampIndices[timestamp] = len(timestamps)
+					timestamps = append(timestamps, timestamp)
+
+					tagMap[items[1]]["fleet"] = items[2]
+					tagMap[items[1]]["driver"] = items[3]
+					tagMap[items[1]]["model"] = items[4]
+					tagMap[items[1]]["device_version"] = items[5]
+
+					for _, p := range performance {
+						if p == items[6] {
+							tagMap[items[1]][p] = subValues[i]
+							ifp = true
+							break
+						}
+					}
+				}
+				if !ifp {
+					newPath := items[0] + "." + items[6]
+					if _, ok := pathIndices[newPath]; !ok {
+						pathIndices[newPath] = len(paths)
+						paths = append(paths, newPath)
+						types = append(types, rpc.DataType_DOUBLE)
+					}
+
+					timestamp, _ := strconv.ParseInt(parts[2], 10, 64)
+					id := tagMap[items[1]]["tagid"].(int64)
+					timestamp += id
+					if _, ok := timestampIndices[timestamp]; !ok {
+						timestampIndices[timestamp] = len(timestamps)
+						timestamps = append(timestamps, timestamp)
+					}
+				}
 			}
 		}
-		subPaths, subValues := parseMeasurementAndValues(parts[0], parts[1])
-		for i, subPath := range subPaths {
-			firstIndex := pathIndices[subPath]
-			values[firstIndex][secondIndex] = subValues[i]
+
+		for range paths {
+			values = append(values, make([]interface{}, max(len(tagMap), len(timestamps)), max(len(tagMap), len(timestamps))))
+		}
+
+		ts := 0
+		for key, innerMap := range tagMap {
+			secondIndex := 0
+			for i := range timestamps {
+				if timestamps[i] == int64(ts) {
+					secondIndex = i
+					break
+				}
+			}
+			path1 := "tags.name"
+			firstIndex1 := pathIndices[path1]
+			values[firstIndex1][secondIndex] = key
+
+			for innerKey, value := range innerMap {
+				path2 := "tags." + innerKey
+				firstIndex2 := pathIndices[path2]
+				values[firstIndex2][secondIndex] = value
+			}
+			ts++
+		}
+
+		for _, line := range lines {
+			parts := strings.Split(line, " ")
+			timestamp, _ := strconv.ParseInt(parts[2], 10, 64)
+			subPaths, subValues := parseMeasurementAndValues(parts[0], parts[1])
+			for i, subPath := range subPaths {
+				items := strings.Split(subPath, ".")
+				ifp := false
+				for _, p := range performance {
+					if p == items[6] {
+						ifp = true
+						break
+					}
+				}
+
+				secondIndex := 0
+				id := tagMap[items[1]]["tagid"].(int64)
+				ts := timestamp + id
+				for i := range timestamps {
+					if timestamps[i] == ts {
+						secondIndex = i
+						break
+					}
+				}
+
+				if !ifp {
+					path1 := items[0] + "." + items[6]
+					firstIndex1 := pathIndices[path1]
+					values[firstIndex1][secondIndex] = subValues[i]
+
+					path2 := items[0] + "." + "tagid"
+					firstIndex2 := pathIndices[path2]
+					values[firstIndex2][secondIndex] = tagMap[items[1]]["tagid"]
+
+					path3 := items[0] + "." + "timestamp"
+					firstIndex3 := pathIndices[path3]
+					values[firstIndex3][secondIndex] = timestamp
+				}
+			}
+		}
+	} else {
+		pathIndices["cpu.hostname"] = len(paths)
+		paths = append(paths, "cpu.hostname")
+		types = append(types, rpc.DataType_BINARY)
+
+		pathIndices["cpu.usage_user"] = len(paths)
+		paths = append(paths, "cpu.usage_user")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_system"] = len(paths)
+		paths = append(paths, "cpu.usage_system")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_idle"] = len(paths)
+		paths = append(paths, "cpu.usage_idle")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_nice"] = len(paths)
+		paths = append(paths, "cpu.usage_nice")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_iowait"] = len(paths)
+		paths = append(paths, "cpu.usage_iowait")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_irq"] = len(paths)
+		paths = append(paths, "cpu.usage_irq")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_softirq"] = len(paths)
+		paths = append(paths, "cpu.usage_softirq")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_steal"] = len(paths)
+		paths = append(paths, "cpu.usage_steal")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_guest"] = len(paths)
+		paths = append(paths, "cpu.usage_guest")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.usage_guest_nice"] = len(paths)
+		paths = append(paths, "cpu.usage_guest_nice")
+		types = append(types, rpc.DataType_LONG)
+
+		pathIndices["cpu.timestamp"] = len(paths)
+		paths = append(paths, "cpu.timestamp")
+		types = append(types, rpc.DataType_LONG)
+
+		for _, line := range lines {
+			parts := strings.Split(line, " ")
+			timestamp, _ := strconv.ParseInt(parts[2], 10, 64)
+			host := strings.Split(parts[0], ",")[1]
+			id := strings.Split(host, "_")[1]
+			tid, _ := strconv.ParseInt(id, 10, 64)
+			timestamp += tid
+			if _, ok := timestampIndices[timestamp]; !ok {
+				timestampIndices[timestamp] = len(timestamps)
+				timestamps = append(timestamps, timestamp)
+			}
+		}
+
+		for range paths {
+			values = append(values, make([]interface{}, len(timestamps), len(timestamps)))
+		}
+
+		for _, line := range lines {
+			parts := strings.Split(line, " ")
+			timestamp, _ := strconv.ParseInt(parts[2], 10, 64)
+			host := strings.Split(parts[0], ",")[1]
+			id := strings.Split(host, "_")[1]
+			tid, _ := strconv.ParseInt(id, 10, 64)
+			ts := timestamp + tid
+			secondIndex := 0
+			for i := range timestamps {
+				if timestamps[i] == ts {
+					secondIndex = i
+					break
+				}
+			}
+			path0 := "cpu.hostname"
+			firstIndex0 := pathIndices[path0]
+			values[firstIndex0][secondIndex] = strings.Split(host, "=")[1]
+
+			path1 := "cpu.timestamp"
+			firstIndex1 := pathIndices[path1]
+			values[firstIndex1][secondIndex] = timestamp
+
+			items := strings.Split(parts[1], ",")
+			for _, item := range items {
+				key := strings.Split(item, "=")[0]
+				value := strings.Split(item, "=")[1]
+
+				path := "cpu." + key
+				firstIndex := pathIndices[path]
+				v, _ := strconv.ParseInt(value, 10, 64)
+				values[firstIndex][secondIndex] = v
+			}
 		}
 	}
 
