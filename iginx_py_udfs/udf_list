@@ -1,0 +1,15 @@
+# 每一行代表一个 UDF/Transform 实例
+# 函数类型,函数别名(用于SQL),类名,文件名
+UDAF,ifbreak,UDFifbreak,udaf_ifbreak.py
+
+UDTF,div6,UDFdiv6,udtf_div6.py
+UDTF,div,UDFdiv,udtf_div.py
+UDTF,div144,UDFdiv144,udtf_div144.py
+
+UDSF,timebucket1m,UDFTimebucket1m,udsf_timebucket1m.py
+UDSF,timebucket10m,UDFTimebucket10m,udsf_timebucket10m.py
+UDSF,timebucketday,UDFTimebucketday,udsf_timebucketday.py
+UDSF,timebuckethour,UDFTimebuckethour,udsf_timebuckethour.py
+UDSF,timebucketdayten,UDFTimebucketdayten,udsf_timebucketdayten.py
+UDSF,startstop,UDFDuration,udsf_duration.py
+UDSF,lead,UDFlead,udsf_lead.py

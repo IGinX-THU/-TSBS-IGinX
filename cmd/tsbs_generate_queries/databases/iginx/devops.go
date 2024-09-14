@@ -25,14 +25,35 @@ type Devops struct {
 // a set of column idents.
 //
 // For instance:
-//      max(cpu_time) AS max_cpu_time
-func (d *Devops) getSelectAggClauses(aggFunc string, idents []string) []string {
-	selectAggClauses := make([]string, len(idents))
-	for i, ident := range idents {
-		selectAggClauses[i] =
-			fmt.Sprintf("%[1]s(%[2]s) AS %[1]s_%[2]s", aggFunc, ident)
+//
+//	max(cpu_time) AS max_cpu_time
+
+func (d *Devops) getSelectClausesAggMetrics(agg string, metrics []string) []string {
+	selectClauses := make([]string, len(metrics))
+	for i, m := range metrics {
+		selectClauses[i] = fmt.Sprintf("%[1]s(%[2]s) as %[1]s_%[2]s", agg, m)
 	}
-	return selectAggClauses
+
+	return selectClauses
+}
+
+func (d *Devops) getSelectBucketClauses(Bucket string, idents []string) []string {
+	selectBucketClauses := make([]string, len(idents))
+	for i, ident := range idents {
+		selectBucketClauses[i] =
+			fmt.Sprintf("`%[1]s(cpu.%[2]s)` AS %[2]s", Bucket, ident)
+	}
+	return selectBucketClauses
+}
+
+func (d *Devops) getHostWhereWithHostnames(hostnames []string) string {
+	hostnameClauses := []string{}
+	for _, s := range hostnames {
+		hostnameClauses = append(hostnameClauses, fmt.Sprintf("cpu.hostname = '%s'", s))
+	}
+
+	combinedHostnameClause := strings.Join(hostnameClauses, " or ")
+	return "AND (" + combinedHostnameClause + ")"
 }
 
 // MaxAllCPU selects the MAX of all metrics under 'cpu' per hour for N random
@@ -43,57 +64,44 @@ func (d *Devops) getSelectAggClauses(aggFunc string, idents []string) []string {
 // cpu-max-all-8
 func (d *Devops) MaxAllCPU(qi query.Query, nHosts int, duration time.Duration) {
 	interval := d.Interval.MustRandWindow(duration)
+	start := interval.Start().Unix() * 1000 * 1000 * 1000
+	end := interval.End().Unix() * 1000 * 1000 * 1000
 	hosts, err := d.GetRandomHosts(nHosts)
 	metrics := devops.GetAllCPUMetrics()
 	panicIfErr(err)
+	SelectBucketClauses := d.getSelectBucketClauses("timebuckethour", metrics)
+	SelectAggClauses := d.getSelectClausesAggMetrics("max", metrics)
+	sql := fmt.Sprintf(`SELECT hour, %s 
+		FROM (
+			SELECT `+"`"+`timebuckethour(cpu.timestamp)`+"`"+` AS hour, %s 
+			FROM (
+				SELECT timebuckethour(*) 
+				FROM (
+					SELECT timestamp, %s
+					FROM cpu 
+					WHERE cpu.timestamp >= %d 
+					AND cpu.timestamp < %d
+					%s
+				)
+			)
+		) 
+		GROUP BY hour 
+		ORDER BY hour;`,
+		strings.Join(SelectAggClauses, ", "),
+		strings.Join(SelectBucketClauses, ", "),
+		strings.Join(metrics, ", "),
+		start,
+		end,
+		d.getHostWhereWithHostnames(hosts))
 
-	sql := fmt.Sprintf(`{
-  		"start_absolute": %d,
-  		"end_absolute": %d,
-  		"time_zone": "Asia/Kabul",
-  		"metrics": [
-	`,
-
-		interval.StartUnixMillis(),
-		interval.EndUnixMillis())
-	i := 0
-	for i = 0; i < len(metrics); i++ {
-		sql += fmt.Sprintf(`
-
-		{
-      		"name": "%s",
-      		"aggregators": [
-			{
-          		"name": "max",
-				"tags": {
-            		"hostname": [
-              			"%s"
-            		],
-            		"type": [
-              			"cpu"
-            		]
-          		},
-          		"sampling": {
-            		"value": 1,
-            		"unit": "hours"
-          		}
-        	}]
-    	}
-	`,
-			metrics[i],
-			strings.Join(hosts, "\", \""))
-		if i != len(metrics)-1 {
-			sql += ","
-		}
-	}
-	sql += "]}"
+	fmt.Printf("query: %s\n", sql)
 	humanLabel := devops.GetMaxAllLabel("Iginx", nHosts)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
 	d.fillInQuery(qi, humanLabel, humanDesc, sql)
 }
 
 // GroupByTimeAndPrimaryTag selects the AVG of metrics in the group `cpu` per device
-// per hour for a day
+// per hour for a hour
 //
 // Queries:
 // double-groupby-1
@@ -103,46 +111,32 @@ func (d *Devops) GroupByTimeAndPrimaryTag(qi query.Query, numMetrics int) {
 	metrics, err := devops.GetCPUMetricsSlice(numMetrics)
 	panicIfErr(err)
 	interval := d.Interval.MustRandWindow(devops.DoubleGroupByDuration)
+	start := interval.Start().Unix() * 1000 * 1000 * 1000
+	end := interval.End().Unix() * 1000 * 1000 * 1000
+	SelectBucketClauses := d.getSelectBucketClauses("timebuckethour", metrics)
+	SelectAggClauses := d.getSelectClausesAggMetrics("avg", metrics)
 
-	sql := fmt.Sprintf(`{
-  		"start_absolute": %d,
-  		"end_absolute": %d,
-  		"time_zone": "Asia/Kabul",
-  		"metrics": [
-	`,
-		interval.StartUnixMillis(),
-		interval.EndUnixMillis())
-	i := 0
-	for i = 0; i < len(metrics); i++ {
-		sql += fmt.Sprintf(`
+	sql := fmt.Sprintf(`SELECT hour, hostname, %s
+		FROM (
+			SELECT `+"`"+`timebuckethour(cpu.timestamp)`+"`"+` AS hour,`+"`"+`timebuckethour(cpu.hostname)`+"`"+` AS hostname, %s 
+			FROM (
+				SELECT timebuckethour(*) 
+				FROM (
+					SELECT timestamp, hostname, %s
+					FROM cpu 
+					WHERE cpu.timestamp >= %d 
+					AND cpu.timestamp < %d
+				)
+			)
+		) 
+		GROUP BY hour, hostname;`,
+		strings.Join(SelectAggClauses, ", "),
+		strings.Join(SelectBucketClauses, ", "),
+		strings.Join(metrics, ", "),
+		start,
+		end)
 
-		{
-      		"name": "%s",
-      		"aggregators": [
-			{
-          		"name": "avg",
-				"tags": {
-            		"hostname": [
-              			"*"
-            		],
-            		"type": [
-              			"cpu"
-            		]
-          		},
-          		"sampling": {
-            		"value": 1,
-            		"unit": "hours"
-          		}
-        	}]
-    	}
-	`,
-			metrics[i])
-		if i != len(metrics)-1 {
-			sql += ","
-		}
-	}
-	sql += "]}"
-
+	fmt.Printf("query: %s\n", sql)
 	humanLabel := devops.GetDoubleGroupByLabel("Iginx", numMetrics)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
 	d.fillInQuery(qi, humanLabel, humanDesc, sql)
@@ -155,51 +149,25 @@ func (d *Devops) GroupByTimeAndPrimaryTag(qi query.Query, numMetrics int) {
 // groupby-orderby-limit
 func (d *Devops) GroupByOrderByLimit(qi query.Query) {
 	interval := d.Interval.MustRandWindow(time.Hour)
+	end := interval.End().Unix() * 1000 * 1000 * 1000
 
-	metrics := [1]string{"usage_user"}
+	sql := fmt.Sprintf(`SELECT minute, max(usage_user) 
+		FROM (
+			SELECT `+"`"+`timebucket1m(cpu.timestamp)`+"`"+` AS minute,`+"`"+`timebucket1m(cpu.usage_user)`+"`"+` AS usage_user 
+			FROM (
+				SELECT timebucket1m(*) 
+				FROM (
+					SELECT timestamp, usage_user 
+					FROM cpu 
+					WHERE cpu.timestamp < %d
+				)
+			)
+		) 
+		GROUP BY minute 
+		ORDER BY minute DESC LIMIT 5;`,
+		end)
 
-	sql := fmt.Sprintf(`{
-  		"start_relative": {
-		"value": "5",
-		"unit": "minutes"
-	},
-
-  		"end_absolute": %d,
-  		"time_zone": "Asia/Kabul",
-  		"metrics": [
-	`,
-		interval.EndUnixMillis())
-	i := 0
-	for i = 0; i < len(metrics); i++ {
-		sql += fmt.Sprintf(`
-
-		{
-      		"name": "%s",
-      		"aggregators": [
-			{
-          		"name": "max",
-				"tags": {
-            		"hostname": [
-              			"*"
-            		],
-            		"type": [
-              			"cpu"
-            		]
-          		},
-          		"sampling": {
-            		"value": 1,
-            		"unit": "minutes"
-          		}
-        	}]
-    	}
-	`,
-			metrics[i])
-		if i != len(metrics)-1 {
-			sql += ","
-		}
-	}
-	sql += "]}"
-
+	fmt.Printf("query: %s\n", sql)
 	humanLabel := "Iginx max cpu over last 5 min-intervals (random end)"
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.EndString())
 	d.fillInQuery(qi, humanLabel, humanDesc, sql)
@@ -210,45 +178,13 @@ func (d *Devops) GroupByOrderByLimit(qi query.Query) {
 // Queries:
 // lastpoint
 func (d *Devops) LastPointPerHost(qi query.Query) {
-	metrics := devops.GetAllCPUMetrics()
-
-	sql := fmt.Sprintf(`{
-  		"start_absolute": 0,
-  		"end_absolute": 2000000000000,
-  		"time_zone": "Asia/Kabul",
-  		"metrics": [
-	`)
-	i := 0
-	for i = 0; i < len(metrics); i++ {
-		sql += fmt.Sprintf(`
-
-		{
-      		"name": "%s",
-      		"aggregators": [
-			{
-          		"name": "last",
-				"tags": {
-            		"hostname": [
-              			"*"
-            		],
-            		"type": [
-              			"cpu"
-            		]
-          		},
-          		"sampling": {
-            		"value": 1,
-            		"unit": "years"
-          		}
-        	}]
-    	}
-	`,
-			metrics[i])
-		if i != len(metrics)-1 {
-			sql += ","
-		}
-	}
-	sql += "]}"
-
+	sql := fmt.Sprintf(`SELECT * FROM cpu 
+		WHERE timestamp 
+		IN (
+			SELECT max(timestamp) 
+			FROM cpu
+		);`)
+	fmt.Printf("query: %s\n", sql)
 	humanLabel := "Iginx last row per host"
 	humanDesc := humanLabel
 	d.fillInQuery(qi, humanLabel, humanDesc, sql)
@@ -263,114 +199,26 @@ func (d *Devops) LastPointPerHost(qi query.Query) {
 // high-cpu-all
 func (d *Devops) HighCPUForHosts(qi query.Query, nHosts int) {
 	interval := d.Interval.MustRandWindow(devops.HighCPUDuration)
-	sql := ""
-	metrics := devops.GetAllCPUMetrics()
-
-	if nHosts > 0 {
-		hosts, err := d.GetRandomHosts(nHosts)
-		panicIfErr(err)
-
-		sql = fmt.Sprintf(`
-		      SELECT *
-		      FROM cpu
-		      WHERE usage_user > 90.0
-		       AND hostname IN ('%s')
-		       AND timestamp >= '%s'
-		       AND timestamp < '%s'`,
-			strings.Join(hosts, "', '"),
-			interval.StartString(),
-			interval.EndString())
-
-		sql = fmt.Sprintf(`{
-  		"start_absolute": %d,
-  		"end_absolute": %d,
-  		"time_zone": "Asia/Kabul",
-  		"metrics": [
-	`,
-			interval.StartUnixMillis(),
-			interval.EndUnixMillis())
-		i := 0
-		for i = 0; i < len(metrics); i++ {
-			sql += fmt.Sprintf(`
-
-		{
-      		"name": "%s",
-      		"aggregators": [
-			{
-          		"name": "avg",
-				"tags": {
-            		"hostname": [
-              			"*"
-            		],
-            		"type": [
-              			"cpu"
-            		]
-          		},
-          		"sampling": {
-            		"value": 1,
-            		"unit": "hours"
-          		}
-        	}]
-    	}
-	`,
-				metrics[i])
-			if i != len(metrics)-1 {
-				sql += ","
-			}
-		}
-		sql += "]}"
-
+	start := interval.Start().Unix() * 1000 * 1000 * 1000
+	end := interval.End().Unix() * 1000 * 1000 * 1000
+	var hostWhereClause string
+	if nHosts == 0 {
+		hostWhereClause = ""
 	} else {
-		sql = fmt.Sprintf(`
-		      SELECT *
-		      FROM cpu
-		      WHERE usage_user > 90.0
-		       AND timestamp >= '%s'
-		       AND timestamp < '%s'`,
-			interval.StartString(),
-			interval.EndString())
-
-		sql = fmt.Sprintf(`{
-  		"start_absolute": %d,
-  		"end_absolute": %d,
-  		"time_zone": "Asia/Kabul",
-  		"metrics": [
-	`,
-			interval.StartUnixMillis(),
-			interval.EndUnixMillis())
-		i := 0
-		for i = 0; i < len(metrics); i++ {
-			sql += fmt.Sprintf(`
-
-		{
-      		"name": "%s",
-      		"aggregators": [
-			{
-          		"name": "avg",
-				"tags": {
-            		"hostname": [
-              			"*"
-            		],
-            		"type": [
-              			"cpu"
-            		]
-          		},
-          		"sampling": {
-            		"value": 1,
-            		"unit": "hours"
-          		}
-        	}]
-    	}
-	`,
-				metrics[i])
-			if i != len(metrics)-1 {
-				sql += ","
-			}
-		}
-		sql += "]}"
-
+		hosts, err := d.GetRandomHosts(nHosts)
+		hostWhereClause = d.getHostWhereWithHostnames(hosts)
+		panicIfErr(err)
 	}
-
+	sql := fmt.Sprintf(`SELECT * 
+		FROM cpu 
+		WHERE usage_user > 90.0 
+		AND timestamp >= %d
+		AND timestamp < %d
+		%s;`,
+		start,
+		end,
+		hostWhereClause)
+	fmt.Printf("query: %s\n", sql)
 	humanLabel, err := devops.GetHighCPULabel("Iginx", nHosts)
 	panicIfErr(err)
 	humanDesc := fmt.Sprintf("%s: %s", humanLabel, interval.StartString())
@@ -389,51 +237,37 @@ func (d *Devops) HighCPUForHosts(qi query.Query, nHosts int) {
 // single-groupby-5-8-1
 func (d *Devops) GroupByTime(qi query.Query, nHosts, numMetrics int, timeRange time.Duration) {
 	interval := d.Interval.MustRandWindow(timeRange)
+	start := interval.Start().Unix() * 1000 * 1000 * 1000
+	end := interval.End().Unix() * 1000 * 1000 * 1000
 	metrics, err := devops.GetCPUMetricsSlice(numMetrics)
+	SelectBucketClauses := d.getSelectBucketClauses("timebucket1m", metrics)
+	SelectAggClauses := d.getSelectClausesAggMetrics("max", metrics)
 	panicIfErr(err)
 	hosts, err := d.GetRandomHosts(nHosts)
 	panicIfErr(err)
-
-	sql := fmt.Sprintf(`{
-  		"start_absolute": %d,
-  		"end_absolute": %d,
-  		"time_zone": "Asia/Kabul",
-  		"metrics": [
-	`,
-		interval.StartUnixMillis(),
-		interval.EndUnixMillis())
-	i := 0
-	for i = 0; i < len(metrics); i++ {
-		sql += fmt.Sprintf(`
-
-		{
-      		"name": "%s",
-      		"aggregators": [
-			{
-          		"name": "max",
-				"tags": {
-            		"hostname": [
-              			"%s"
-            		],
-            		"type": [
-              			"cpu"
-            		]
-          		},
-          		"sampling": {
-            		"value": 1,
-            		"unit": "minutes"
-          		}
-        	}]
-    	}
-	`,
-			metrics[i],
-			strings.Join(hosts, "\", \""))
-		if i != len(metrics)-1 {
-			sql += ","
-		}
-	}
-	sql += "]}"
-
+	sql := fmt.Sprintf(`SELECT minute, %s
+		FROM (
+			SELECT `+"`"+`timebucket1m(cpu.timestamp)`+"`"+` AS minute, %s  
+			FROM (
+				SELECT timebucket1m(*) 
+				FROM (
+					SELECT timestamp, %s 
+					FROM cpu 
+					WHERE cpu.timestamp >= %d
+					AND cpu.timestamp < %d
+					%s
+				)
+			)
+		) 
+		GROUP BY minute 
+		ORDER BY minute ASC;`,
+		strings.Join(SelectAggClauses, ", "),
+		strings.Join(SelectBucketClauses, ", "),
+		strings.Join(metrics, ", "),
+		start,
+		end,
+		d.getHostWhereWithHostnames(hosts))
+	fmt.Printf("query: %s\n", sql)
 	humanLabel := fmt.Sprintf(
 		"Iginx %d cpu metric(s), random %4d hosts, random %s by 1m",
 		numMetrics, nHosts, timeRange)
